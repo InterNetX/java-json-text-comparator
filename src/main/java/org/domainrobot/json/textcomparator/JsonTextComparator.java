@@ -12,6 +12,7 @@ import java.util.Set;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
  * A json comparator that compares two json strings following the fluent interface pattern. It's based on jackson
@@ -30,6 +31,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public class JsonTextComparator {
 
 	private ObjectMapper mapper = new ObjectMapper();
+	
+	private String indexPattern = "%s[%d]";
 
 	private String json1;
 
@@ -101,6 +104,11 @@ public class JsonTextComparator {
 		this.mapper = mapper;
 		return this;
 	}
+	
+	public JsonTextComparator setIndexPattern(String indexPattern) {
+		this.indexPattern = indexPattern;
+		return this;
+	}
 
 	public JsonTextComparator setKeysToIgnore(Set<String> keysToIgnore) {
 		this.keysToIgnore = keysToIgnore;
@@ -164,42 +172,31 @@ public class JsonTextComparator {
 	private void traverse(String path, JsonNode n1, JsonNode n2) throws JsonProcessingException {
 		List<String> processedNodes = new ArrayList<>();
 		if(n1.isArray()) {
-			Iterator<JsonNode> iter = n1.elements();
-			while(iter.hasNext()) {
-				JsonNode node = iter.next();
-				if(node.isObject() || node.isArray()) {
-					traverse(path, node, n2);
+			// we need a special handling for Arrays because of the index
+			Iterator<JsonNode> aryIter1 = n1.elements();
+			Iterator<JsonNode> aryIter2 = n2.elements();
+			int cnt = 0;
+			while(aryIter1.hasNext()) {
+				JsonNode itemNode1 = aryIter1.next();
+				JsonNode itemNode2 =  (aryIter2.hasNext()) ? aryIter2.next() : null;
+				if(itemNode1.isObject()) {
+					doCompare(cnt, processedNodes, path, (ObjectNode) itemNode1, (ObjectNode) itemNode2);
+				} else if(itemNode1.isArray()) {
+					traverse(path, itemNode1, itemNode2);
 				}
+				cnt++;
 			}
-		} else if(n1.isObject()) {
-			Iterator<String> iter = n1.fieldNames();
-			while(iter.hasNext()) {
+			while(aryIter2.hasNext()) {
+				JsonNode itemNode2 = aryIter2.next();
+				Iterator<String> iter = itemNode2.fieldNames();
 				String key = iter.next();
 				String currentPath = path + "/" + key;
-				// System.out.println(currentPath);
-				processedNodes.add(key);
-				boolean ignore = toIgnore(currentPath, key);
-				if(ignore)
-					continue;
-				JsonNode child1 = n1.path(key);
-				JsonNode child2 = fetchChildNode(n2, key);
-				if(child2 == null) {
-					messageHandler.addMissingInSrc2(currentPath);
-				} else if(checkNullIsUnavailable(child1, child2)) {
-					continue;
-				} else if(!child1.getNodeType().equals(child2.getNodeType())) {
-					messageHandler.addWrongType(currentPath);
-				} else if(namedNodeComparators.containsKey(key)) {
-					processNamedNodeComparator(currentPath, namedNodeComparators.get(key), child1, child2);
-				} else if(child1.isContainerNode() && !isSimpleArray(child1)) {
-					traverse(currentPath, child1, child2);
-				} else {
-					String val1Str = toString(child1);
-					String val2Str = toString(child2);
-					if(!val1Str.equals(val2Str))
-						messageHandler.addDiff(currentPath, val1Str, val2Str);
-				}
+				if(cnt != 0)
+					currentPath = String.format(indexPattern, currentPath, cnt);
+				messageHandler.addMissingInSrc1(currentPath);
 			}
+		} else if(n1.isObject()) {
+			doCompare(processedNodes, path, (ObjectNode) n1, (ObjectNode) n2);
 		}
 
 		Iterator<Map.Entry<String, JsonNode>> iter2 = n2.fields();
@@ -215,7 +212,63 @@ public class JsonTextComparator {
 		}
 	}
 
-	private void processNamedNodeComparator(String currentPath, NamedNodeComparator namedNodeComparator, JsonNode n1, JsonNode n2) {
+	private void doCompare(List<String> processedNodes, String path, ObjectNode n1, ObjectNode n2) throws JsonProcessingException {
+		doCompare(null, processedNodes, path, n1, n2);
+	}
+
+	/**
+	 * The man compare method.
+	 * 
+	 * @param cnt
+	 * @param processedNodes
+	 * @param path
+	 * @param n1
+	 * @param n2
+	 * @throws JsonProcessingException
+	 */
+	private void doCompare(Integer cnt, List<String> processedNodes, String path, ObjectNode n1, ObjectNode n2) throws JsonProcessingException {
+		Iterator<String> iter = n1.fieldNames();
+		while(iter.hasNext()) {
+			String key = iter.next();
+			String currentPath = path + "/" + key;
+			if(cnt != null)
+				currentPath = String.format(indexPattern, currentPath, cnt);
+			// System.out.println(currentPath);
+			processedNodes.add(key);
+			boolean ignore = toIgnore(currentPath, key);
+			if(ignore)
+				continue;
+			JsonNode child1 = n1.path(key);
+			JsonNode child2 = fetchChildNode(n2, key);
+			if(child2 == null) {
+				messageHandler.addMissingInSrc2(currentPath);
+			} else if(checkNullIsUnavailable(child1, child2)) {
+				continue;
+			} else if(!child1.getNodeType().equals(child2.getNodeType())) {
+				messageHandler.addWrongType(currentPath);
+			} else if(namedNodeComparators.containsKey(key)) {
+				processNamedNodeCoparator(currentPath, namedNodeComparators.get(key), child1, child2);
+			} else if(child1.isContainerNode() && !isSimpleArray(child1)) {
+				traverse(currentPath, child1, child2);
+			} else {
+				String val1Str = toString(child1);
+				String val2Str = toString(child2);
+				if(!val1Str.equals(val2Str))
+					messageHandler.addDiff(currentPath, val1Str, val2Str);
+			}
+		}
+		
+	}
+	
+	/**
+	 * Starts the processing of the desired {@link NamedNodeComparator} and handles its diff.
+	 *  
+	 * @param currentPath
+	 * @param namedNodeComparator
+	 * @param n1
+	 * @param n2
+	 */
+	private void processNamedNodeCoparator(String currentPath, NamedNodeComparator namedNodeComparator, JsonNode n1, JsonNode n2) {
 		JsonDiff diff = namedNodeComparator.process(n1, n2);
 		if(diff != null)
 			messageHandler.addDiff(currentPath, diff.getVal1Str(), diff.getVal2Str());
@@ -229,6 +282,8 @@ public class JsonTextComparator {
 	 * @return
 	 */
 	private JsonNode fetchChildNode(JsonNode parent, String name) {
+		if(parent == null)
+			return null;
 		JsonNode child = parent.get(name);
 		if(parent.isArray() && child == null) {
 			Iterator<JsonNode> iterChildren2 = parent.elements();
@@ -286,7 +341,12 @@ public class JsonTextComparator {
 	}
 
 	private boolean toIgnore(String path, String key) {
+		path = cleanIndex(path);
+		key = cleanIndex(key);
 		return pathsToIgnore.contains(path) || keysToIgnore.contains(key);
 	}
 
+	String cleanIndex(String str) {
+		return (str == null) ? null : str.replaceAll("\\[\\d+\\]", "");
+	}
 }
